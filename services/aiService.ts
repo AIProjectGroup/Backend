@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { Product } from './productService';
 import { ConversationContext } from './contextService';
+import { detectIntentByRules } from '../utils/intentRules';
 
 export interface ExtractedEntities {
     intent: 'search' | 'compare' | 'recommend' | 'question' | 'refine' | 'budget' | 'scenario';
@@ -66,9 +67,6 @@ export class AIService {
         };
     }
 
-    // ================================
-    // INTENT & ENTITY EXTRACTION
-    // ================================
     static async extractIntentAndEntities(
         message: string,
         context: ConversationContext,
@@ -77,29 +75,42 @@ export class AIService {
     ): Promise<ExtractedEntities> {
         try {
             const lower = message.toLowerCase();
+            const language = this.detectLanguage(message);
 
-            let productType: ExtractedEntities['productType'] | undefined;
+            const keywordIntent = this.detectIntentFromKeywords(message);
+            
+            const systemPrompt = this.buildSystemPrompt(context, categories, language);
 
-            if (lower.includes('phone') || lower.includes('smartphone') || lower.includes('mobile')) {
-                productType = 'phone';
-            } else if (lower.includes('charger')) {
-                productType = 'charger';
-            } else if (lower.includes('case') || lower.includes('cover')) {
-                productType = 'case';
-            } else if (lower.includes('earbuds') || lower.includes('headphones')) {
-                productType = 'earbuds';
-            } else if (lower.includes('tv')) {
-                productType = 'tv';
-            }
+            const userPrompt = language === 'uk' ? `
+Проаналізуй повідомлення користувача та витягни намір та сутності у форматі JSON.
 
-            const systemPrompt = this.buildSystemPrompt(context, categories);
+Повідомлення:
+"${message}"
 
-            const userPrompt = `
+Поверни ТІЛЬКИ валідний JSON:
+{
+  "intent": "search|compare|recommend|question|refine|budget|scenario",
+  "category": string | null,
+  "mainCategory": string | null,
+  "budget": number | null,
+  "minPrice": number | null,
+  "maxPrice": number | null,
+  "rating": number | null,
+  "searchTerm": string | null,
+  "productIds": number[] | null,
+  "brand": string | null,
+  "productType": 'phone' | 'charger' | 'case' | 'earbuds' | 'tv',
+  "useCase": string | null,
+  "specifications": object | null,
+  "language": "en|uk",
+  "needsClarification": boolean,
+  "clarificationQuestion": string | null
+}
+` : `
 Analyze the following user message and extract intent and entities in JSON format.
 
 Message:
 "${message}"
-
 
 Return ONLY valid JSON:
 {
@@ -138,29 +149,23 @@ Return ONLY valid JSON:
             console.log('Raw AI response:', response.data);
             const content = response.data.output_text;
             const entities = JSON.parse(content) as ExtractedEntities;
-            entities.productType = productType;
-            entities.language = this.detectLanguage(message);
             
-
-            const compareKeywords = ['compare', 'difference', 'vs', 'versus', 'two', 'both'];
-            const messageLower = message.toLowerCase();
-
-            if (compareKeywords.some(word => messageLower.includes(word))) {
-                entities.intent = 'compare';
+            if (entities.intent === 'search' && keywordIntent) {
+                entities.intent = keywordIntent;
             }
-
-            // 🔧 HARD FIX FOR BUDGET (DEMO SAFE)
-            const budgetMatch = message.match(/under\s+(\d+)|below\s+(\d+)|до\s+(\d+)/i);
-
+            
+            entities.language = language;
+            
+            const budgetMatch = message.match(/under\s+(\d+)|below\s+(\d+)|до\s+(\d+)|ціна\s+до\s+(\d+)/i);
             if (budgetMatch) {
-                const value = Number(budgetMatch[1] || budgetMatch[2] || budgetMatch[3]);
+                const value = Number(budgetMatch[1] || budgetMatch[2] || budgetMatch[3] || budgetMatch[4]);
                 if (!isNaN(value)) {
                     entities.maxPrice = value;
-                    entities.intent = 'budget';
+                    if (!entities.intent || entities.intent === 'search') {
+                        entities.intent = 'budget';
+                    }
                 }
             }
-
-            // console.log('EXTRACTED ENTITIES:', entities);
 
             return entities;
         } catch (error) {
@@ -168,88 +173,6 @@ Return ONLY valid JSON:
             return this.fallbackExtraction(message, context);
         }
     }
-
-
-//     static async generateResponse(
-        
-//         message: string,
-//         context: ConversationContext,
-//         entities: ExtractedEntities,
-//         products: Product[],
-//         userBehavior?: any
-//     ): Promise<AIResponse> {
-//         console.log('🧠 AI generateResponse called');
-//         console.log('🧠 Products count:', products.length);
-//         console.log('🧠 Message:', message);
-
-//         try {
-//             if (products.length === 0) {
-//                 return {
-//                     text:
-//                         entities.language === 'uk'
-//                             ? 'На жаль, за вашим запитом товарів не знайдено.'
-//                             : 'Unfortunately, no products were found for your request.',
-//                     products: [],
-//                     entities
-//                 };
-//             }
-
-//             const productContext = products.slice(0, 10).map(p => `
-// PRODUCT:
-// - ID: ${p.id}
-// - Name: ${p.name}
-// - Category: ${p.main_category} / ${p.sub_category}
-// - Price: ${p.price}
-// - Rating: ${p.rating}
-// - Reviews: ${p.rating_count}
-// `).join('\n');
-
-//             const response = await axios.post(
-//                 this.API_URL,
-//                 {
-//                     model: this.MODEL,
-//                     input: [
-//                         {
-//                             role: 'system',
-//                             content: `
-// You are an AI assistant for an electronics e-commerce platform.
-
-// STRICT RULES:
-// - You MUST recommend ONLY products listed below.
-// - You MUST NOT invent products.
-// - If no products exist, say so.
-// `
-//                         },
-//                         {
-//                             role: 'system',
-//                             content: `AVAILABLE PRODUCTS FROM DATABASE:\n${productContext}`
-//                         },
-//                         {
-//                             role: 'user',
-//                             content: message
-//                         }
-//                     ]
-//                 },
-//                 { headers: this.getHeaders(), timeout: 7000 }
-//             );
-
-//             const aiText =
-//                 response.data?.output?.[0]?.content?.[0]?.text ??
-//                 response.data?.choices?.[0]?.message?.content ??
-//                 'Here are some products you might like:';
-
-//             return {
-//                 text: aiText,
-//                 products: products.slice(0, 10),
-//                 quickReplies: this.generateQuickReplies(entities, products),
-//                 needsProducts: true,
-//                 entities
-//             };
-//         } catch (error) {
-//             console.error('generateResponse error:', error);
-//             return this.generateFallbackResponse(message, entities);
-//         }
-//     }
 
 
 static async generateResponse(
@@ -285,6 +208,14 @@ Price: ${p.price}
                 role: 'system',
                 content: `
               You are a friendly and helpful AI assistant for an electronics e-commerce platform.
+
+              IMPORTANT:
+              - If user language is "uk", respond ONLY in Ukrainian.
+              - If user language is "en", respond ONLY in English.
+              - If intent is "reccomend", searchTerm MUST be null
+              - Recomendation verbs (e.g. "порекомендуй", "recommend") are NOT part of searchTerm
+
+              User language: ${entities.language}
               
               Your task:
               - Help the user choose products.
@@ -353,29 +284,79 @@ Price: ${p.price}
     };
 }
 
-    private static buildSystemPrompt(
-        context: ConversationContext,
-        categories?: { id: number; main_category: string; sub_category: string }[]
-    ): string {
+private static buildSystemPrompt(
+    context: ConversationContext,
+    categories?: { id: number; main_category: string; sub_category: string }[],
+    language: 'en' | 'uk' = 'en'
+): string {
+    if (language === 'uk') {
         let prompt = `
-You are a helpful AI assistant for an electronics store.
-Use ONLY the provided product data.
-Never invent products.
-Use user's language.
+Ти - корисний AI-помічник для інтернет-магазину електроніки.
+Використовуй ТІЛЬКИ надані дані про продукти.
+Ніколи не вигадуй продукти.
+Користувач може писати українською або англійською мовою.
+Розпізнай намір користувача: "search" (пошук), "compare" (порівняння), "recommend" (рекомендація), "question" (питання).
 `;
 
         if (categories?.length) {
-            prompt += `Available categories: ${categories
+            prompt += `Доступні категорії: ${categories
                 .map(c => `${c.main_category} / ${c.sub_category}`)
                 .join(', ')}\n`;
         }
 
         return prompt;
     }
+    
+    let prompt = `
+You are a helpful AI assistant for an electronics store.
+Use ONLY the provided product data.
+Never invent products.
+Use user's language.
+`;
 
-    // ================================
-    // QUICK REPLIES
-    // ================================
+    if (categories?.length) {
+        prompt += `Available categories: ${categories
+            .map(c => `${c.main_category} / ${c.sub_category}`)
+            .join(', ')}\n`;
+    }
+
+    return prompt;
+}
+
+    private static detectIntentFromKeywords(message: string): ExtractedEntities['intent'] | null {
+        const lower = message.toLowerCase();
+        
+        const ukKeywords = {
+            compare: ['порівняй', 'порівняти', 'відмінність', 'проти', 'vs', 'versus'],
+            recommend: ['порекомендуй', 'порадь', 'рекомендації', 'підбери'],
+            search: ['знайди', 'шукаю', 'покажи', 'знайти'],
+            budget: ['бюджет', 'ціна', 'до', 'дешевші', 'дорогі'],
+            question: ['як', 'що', 'чи', 'де', 'коли', 'чому']
+        };
+        
+        const enKeywords = {
+            compare: ['compare', 'difference', 'vs', 'versus', 'two', 'both'],
+            recommend: ['recommend', 'suggest', 'advise'],
+            search: ['find', 'search', 'show', 'look for'],
+            budget: ['budget', 'price', 'under', 'below', 'cheap', 'expensive'],
+            question: ['how', 'what', 'where', 'when', 'why']
+        };
+        
+        for (const [intent, keywords] of Object.entries(ukKeywords)) {
+            if (keywords.some(keyword => lower.includes(keyword))) {
+                return intent as ExtractedEntities['intent'];
+            }
+        }
+        
+        for (const [intent, keywords] of Object.entries(enKeywords)) {
+            if (keywords.some(keyword => lower.includes(keyword))) {
+                return intent as ExtractedEntities['intent'];
+            }
+        }
+        
+        return null;
+    }
+
     private static generateQuickReplies(
         entities: ExtractedEntities,
         products: Product[]
@@ -394,21 +375,19 @@ Use user's language.
         return replies.slice(0, 4);
     }
 
-    // ================================
-    // FALLBACKS
-    // ================================
     private static fallbackExtraction(
         message: string,
         context: ConversationContext
     ): ExtractedEntities {
-        return {
-            intent: 'search',
-            searchTerm: message,
-            language: this.detectLanguage(message),
-            needsClarification: false
-            
-        };
+        const language = this.detectLanguage(message);
+        const keywordIntent = this.detectIntentFromKeywords(message);
         
+        return {
+            intent: keywordIntent || 'search',
+            searchTerm: message,
+            language: language,
+            needsClarification: false
+        };
     }
 
     private static generateFallbackResponse(
