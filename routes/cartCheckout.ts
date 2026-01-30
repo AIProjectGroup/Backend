@@ -74,10 +74,10 @@ async function fetchProductData(productid:string,colorid:string,sizeid:string,qu
         pi.imglink,
         pi.imgalt
       FROM products p
-      JOIN productSizes ps ON ps.productid = p.productid AND ps.sizeid = $2
-      JOIN productcolors pc ON pc.productid = p.productid AND pc.colorid = $3
-      JOIN productimages pi ON pi.productid = p.productid AND pi.isprimary = true
-      WHERE p.productid = $1
+      JOIN productSizes ps ON ps.productid = p.id AND ps.sizeid = $2
+      JOIN productcolors pc ON pc.productid = p.id AND pc.colorid = $3
+      JOIN productimages pi ON pi.productid = p.id AND pi.isprimary = true
+      WHERE p.id = $1
     `;
     const productResult = await client.query(productQuery, [productid, sizeid, colorid]);
 
@@ -145,9 +145,9 @@ async function createCashOrder(userid:string,productid:string, colorid:string, s
     const productQuery = `
       SELECT p.discount
       FROM products p
-      JOIN productcolors pc ON pc.productid = p.productid AND pc.colorid = $2
-      JOIN productSizes ps ON ps.productid = p.productid AND ps.sizeid = $3
-      WHERE p.productid = $1
+      JOIN productcolors pc ON pc.productid = p.id AND pc.colorid = $2
+      JOIN productSizes ps ON ps.productid = p.id AND ps.sizeid = $3
+      WHERE p.id = $1
     `;
     const productResult = await client.query(productQuery, [productid, colorid, sizeid]);
 
@@ -242,9 +242,9 @@ async function createCardOrder(userid:string, productid:string, colorid:string, 
     const productQuery = `
       SELECT p.discount
       FROM products p
-      JOIN productcolors pc ON pc.productid = p.productid AND pc.colorid = $2
-      JOIN productSizes ps ON ps.productid = p.productid AND ps.sizeid = $3
-      WHERE p.productid = $1
+      JOIN productcolors pc ON pc.productid = p.id AND pc.colorid = $2
+      JOIN productSizes ps ON ps.productid = p.id AND ps.sizeid = $3
+      WHERE p.id = $1
     `;
     const productResult = await client.query(productQuery, [productid, colorid, sizeid]);
 

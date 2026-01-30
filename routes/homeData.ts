@@ -15,7 +15,7 @@ const getImage = async (productID:number) => {
         const result = await client.query(
             `SELECT imageid, imglink, imgalt 
              FROM productimages 
-             WHERE productid = $1 AND isprimary = true`,
+             WHERE id = $1 AND isprimary = true`,
             [productID]
         );
         return result.rows[0];

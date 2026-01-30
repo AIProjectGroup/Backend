@@ -14,7 +14,7 @@ const details: DetailsType = {
   password: process.env.DB_PASS || '',
   host: process.env.DB_HOST || '',
   port: parseInt(process.env.DB_PORT || '5432', 10),
-  database: process.env.DB_NAME || 'postgres',
+  database: process.env.DB_NAME || 'electronics',
 };
 
 const client = new Client({
@@ -31,7 +31,7 @@ const connectDB = async () => {
     console.log('Connected to the database');
   } catch (err:any) {
     console.error('Connection error', err.stack);
-    process.exit(1); // Exit the process with a failure code
+    process.exit(1);
   }
 };
 

@@ -13,6 +13,7 @@ export interface ExtractedEntities {
     searchTerm?: string;
     productIds?: number[];
     brand?: string;
+    productType?: 'phone' | 'charger' | 'case' | 'earbuds' | 'tv';
     useCase?: string;
     specifications?: Record<string, any>;
     language?: 'en' | 'uk';
@@ -30,293 +31,398 @@ export interface AIResponse {
 }
 
 export class AIService {
+    private static readonly API_URL = 'https://api.openai.com/v1/responses';
+    private static readonly MODEL = 'gpt-4o-mini';
+    static formatComparison(products: Product[]): { products: any[] } | null {
+        if (!products || products.length < 2) return null;
+    
+        return {
+            products: products.slice(0, 2).map(p => ({
+                id: p.id,
+                name: p.name,
+                price: p.price ?? 'N/A',
+                discount: p.discount ?? 'N/A',
+                rating: p.rating,
+                rating_count: p.rating_count,
+                category: `${p.main_category || ''} / ${p.sub_category}`,
+                image: p.images?.[0]?.imglink || ''
+            }))
+        };
+    }
+    
+
     private static getHeaders() {
         const apiKey = process.env.OPENAI_API_KEY;
         const projectId = process.env.OPENAI_PROJECT_ID;
-    
+
         if (!apiKey) {
             throw new Error('OPENAI_API_KEY is missing');
         }
-    
+
         return {
             Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
             'OpenAI-Project': projectId
         };
     }
-    private static readonly API_URL = 'https://api.openai.com/v1/responses';
-    private static readonly MODEL = 'gpt-4o-mini';
- 
+
+    // ================================
+    // INTENT & ENTITY EXTRACTION
+    // ================================
     static async extractIntentAndEntities(
         message: string,
         context: ConversationContext,
         availableProducts: Product[],
-        categories: { categoryid: number; name: string; maincategory: string }[]
+        categories: { id: number; main_category: string; sub_category: string }[]
     ): Promise<ExtractedEntities> {
         try {
+            const lower = message.toLowerCase();
+
+            let productType: ExtractedEntities['productType'] | undefined;
+
+            if (lower.includes('phone') || lower.includes('smartphone') || lower.includes('mobile')) {
+                productType = 'phone';
+            } else if (lower.includes('charger')) {
+                productType = 'charger';
+            } else if (lower.includes('case') || lower.includes('cover')) {
+                productType = 'case';
+            } else if (lower.includes('earbuds') || lower.includes('headphones')) {
+                productType = 'earbuds';
+            } else if (lower.includes('tv')) {
+                productType = 'tv';
+            }
+
             const systemPrompt = this.buildSystemPrompt(context, categories);
-            const userPrompt = `Analyze the following user message and extract intent and entities in JSON format:\n\n"${message}"\n\nReturn ONLY a valid JSON object with this structure:\n{\n  "intent": "search|compare|recommend|question|refine|budget|scenario",\n  "category": "string or null",\n  "mainCategory": "string or null",\n  "budget": number or null,\n  "minPrice": number or null,\n  "maxPrice": number or null,\n  "rating": number or null,\n  "searchTerm": "string or null",\n  "productIds": [numbers] or null,\n  "brand": "string or null",\n  "useCase": "string or null",\n  "specifications": {} or null,\n  "language": "en|uk",\n  "needsClarification": boolean,\n  "clarificationQuestion": "string or null"\n}\n\nIf the user's request is unclear or missing required information, set needsClarification to true and provide a clarificationQuestion.`;
+
+            const userPrompt = `
+Analyze the following user message and extract intent and entities in JSON format.
+
+Message:
+"${message}"
+
+
+Return ONLY valid JSON:
+{
+  "intent": "search|compare|recommend|question|refine|budget|scenario",
+  "category": string | null,
+  "mainCategory": string | null,
+  "budget": number | null,
+  "minPrice": number | null,
+  "maxPrice": number | null,
+  "rating": number | null,
+  "searchTerm": string | null,
+  "productIds": number[] | null,
+  "brand": string | null,
+  "productType": 'phone' | 'charger' | 'case' | 'earbuds' | 'tv',
+  "useCase": string | null,
+  "specifications": object | null,
+  "language": "en|uk",
+  "needsClarification": boolean,
+  "clarificationQuestion": string | null
+}
+`;
 
             const response = await axios.post(
                 this.API_URL,
                 {
-                    model: 'gpt-4o-mini',
+                    model: this.MODEL,
                     input: [
-                        {
-                        role: 'system',
-                        content: systemPrompt
-                        },
-                        {
-                        role: 'user',
-                        content: userPrompt
-                        }
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: userPrompt }
                     ],
                     temperature: 0.3
                 },
-                {
-                   
-                    headers: this.getHeaders(),
-                    timeout: 7000
-                }
+                { headers: this.getHeaders(), timeout: 7000 }
             );
 
+            console.log('Raw AI response:', response.data);
             const content = response.data.output_text;
-            if (!content) {
-                throw new Error('No response from AI');
+            const entities = JSON.parse(content) as ExtractedEntities;
+            entities.productType = productType;
+            entities.language = this.detectLanguage(message);
+            
+
+            const compareKeywords = ['compare', 'difference', 'vs', 'versus', 'two', 'both'];
+            const messageLower = message.toLowerCase();
+
+            if (compareKeywords.some(word => messageLower.includes(word))) {
+                entities.intent = 'compare';
             }
 
-            const entities = JSON.parse(content) as ExtractedEntities;
-            
-            const detectedLanguage = this.detectLanguage(message);
-            entities.language = detectedLanguage;
+            // 🔧 HARD FIX FOR BUDGET (DEMO SAFE)
+            const budgetMatch = message.match(/under\s+(\d+)|below\s+(\d+)|до\s+(\d+)/i);
+
+            if (budgetMatch) {
+                const value = Number(budgetMatch[1] || budgetMatch[2] || budgetMatch[3]);
+                if (!isNaN(value)) {
+                    entities.maxPrice = value;
+                    entities.intent = 'budget';
+                }
+            }
+
+            // console.log('EXTRACTED ENTITIES:', entities);
 
             return entities;
-
-            // DEBUG
-            // }catch (error: any) {
-            //     console.error('extractIntentAndEntities failed');
-            //     console.error(error.response?.data || error.message);
-            
-            //     throw error;
-            // }
-
-            } catch (error: any) {
-                console.error('Error extracting intent and entities:', error);
-                return this.fallbackExtraction(message, context);
-            }
-
-    }
-
-    static async generateResponse(
-        message: string,
-        context: ConversationContext,
-        entities: ExtractedEntities,
-        products: Product[],
-        userBehavior?: {
-            viewedProducts: number[];
-            clickedProducts: number[];
-            purchasedProducts: number[];
-            favoriteCategories: string[];
+        } catch (error) {
+            console.error('extractIntentAndEntities error:', error);
+            return this.fallbackExtraction(message, context);
         }
-    ): Promise<AIResponse> {
-        try {
-            const systemPrompt = this.buildSystemPrompt(context);
-            const conversationHistory = context.messages
-                .slice(-6)
-                .map(msg => `${msg.role}: ${msg.content}`)
-                .join('\n');
-
-            let userPrompt = `User message: "${message}"\n\nExtracted entities: ${JSON.stringify(entities)}\n\n`;
-            
-            if (products.length > 0) {
-                userPrompt += `Available products (limit to top 5-10):\n${JSON.stringify(products.slice(0, 10).map(p => ({
-                    id: p.productid,
-                    title: p.title,
-                    price: p.discount,
-                    rating: p.stars,
-                    category: p.category
-                })))}\n\n`;
-            }
-
-            if (userBehavior && userBehavior.favoriteCategories.length > 0) {
-                userPrompt += `User's favorite categories: ${userBehavior.favoriteCategories.join(', ')}\n\n`;
-            }
-
-            userPrompt += `Generate a helpful, concise response in ${entities.language || 'en'}. `;
-            userPrompt += `If products are provided, recommend them with brief justifications. `;
-            userPrompt += `Use a friendly, professional tone. Keep response under 300 words.`;
-
-            const response = await axios.post(
-                'https://api.openai.com/v1/responses',
-                {
-                    model: 'gpt-4o-mini',
-                    input: [
-                        { role: 'system', content: systemPrompt },
-                        ...(conversationHistory
-                            ? [{ role: 'user', content: `Previous conversation:\n${conversationHistory}` }]
-                            : []),
-                        { role: 'user', content: userPrompt }
-                    ]
-                },
-                {
-                    
-                    headers: this.getHeaders(),
-                    timeout: 7000
-                }
-            );
-
-            const aiText = response.data.output_text;
-            
-            const quickReplies = this.generateQuickReplies(entities, products);
-
-            return {
-                text: aiText,
-                products: products.length > 0 ? products.slice(0, 10) : undefined,
-                quickReplies,
-                needsProducts: entities.intent === 'search' || entities.intent === 'recommend',
-                entities
-            };
-
-            // DEBUG
-            // }catch (error: any) {
-            //     console.error('generateResponse failed');
-            //     console.error(error.response?.data || error.message);
-            //     return this.generateFallbackResponse(message, entities, products, error);
-            // }
-
-            } catch (error: any) {
-                console.error('Error generating AI response:', error);
-                return this.generateFallbackResponse(message, entities, products);
-            }
     }
+
+
+//     static async generateResponse(
+        
+//         message: string,
+//         context: ConversationContext,
+//         entities: ExtractedEntities,
+//         products: Product[],
+//         userBehavior?: any
+//     ): Promise<AIResponse> {
+//         console.log('🧠 AI generateResponse called');
+//         console.log('🧠 Products count:', products.length);
+//         console.log('🧠 Message:', message);
+
+//         try {
+//             if (products.length === 0) {
+//                 return {
+//                     text:
+//                         entities.language === 'uk'
+//                             ? 'На жаль, за вашим запитом товарів не знайдено.'
+//                             : 'Unfortunately, no products were found for your request.',
+//                     products: [],
+//                     entities
+//                 };
+//             }
+
+//             const productContext = products.slice(0, 10).map(p => `
+// PRODUCT:
+// - ID: ${p.id}
+// - Name: ${p.name}
+// - Category: ${p.main_category} / ${p.sub_category}
+// - Price: ${p.price}
+// - Rating: ${p.rating}
+// - Reviews: ${p.rating_count}
+// `).join('\n');
+
+//             const response = await axios.post(
+//                 this.API_URL,
+//                 {
+//                     model: this.MODEL,
+//                     input: [
+//                         {
+//                             role: 'system',
+//                             content: `
+// You are an AI assistant for an electronics e-commerce platform.
+
+// STRICT RULES:
+// - You MUST recommend ONLY products listed below.
+// - You MUST NOT invent products.
+// - If no products exist, say so.
+// `
+//                         },
+//                         {
+//                             role: 'system',
+//                             content: `AVAILABLE PRODUCTS FROM DATABASE:\n${productContext}`
+//                         },
+//                         {
+//                             role: 'user',
+//                             content: message
+//                         }
+//                     ]
+//                 },
+//                 { headers: this.getHeaders(), timeout: 7000 }
+//             );
+
+//             const aiText =
+//                 response.data?.output?.[0]?.content?.[0]?.text ??
+//                 response.data?.choices?.[0]?.message?.content ??
+//                 'Here are some products you might like:';
+
+//             return {
+//                 text: aiText,
+//                 products: products.slice(0, 10),
+//                 quickReplies: this.generateQuickReplies(entities, products),
+//                 needsProducts: true,
+//                 entities
+//             };
+//         } catch (error) {
+//             console.error('generateResponse error:', error);
+//             return this.generateFallbackResponse(message, entities);
+//         }
+//     }
+
+
+static async generateResponse(
+    message: string,
+    context: ConversationContext,
+    entities: ExtractedEntities,
+    products: Product[]
+): Promise<AIResponse> {
+
+    console.log('ENTER generateResponse');
+
+    if (products.length === 0) {
+        console.log('NO PRODUCTS');
+        return {
+            text: 'No products',
+            products: [],
+            entities
+        };
+    }
+
+    const productContext = products.slice(0, 3).map(p => `
+ID: ${p.id}
+Name: ${p.name}
+Price: ${p.price}
+`).join('\n');
+
+    console.log('PRODUCT CONTEXT:', productContext);
+
+    const payload = {
+        model: this.MODEL,
+        input: [
+            {
+                role: 'system',
+                content: `
+              You are a friendly and helpful AI assistant for an electronics e-commerce platform.
+              
+              Your task:
+              - Help the user choose products.
+              - Speak naturally, like a consultant in a tech store.
+              - Extract intent: "search", "recommend", "compare"
+              - Extract entities: product type, brand, budget, etc.
+              If user wants to compare two products, set intent to "compare".
+              
+              Response style rules:
+              - Start with a short friendly sentence (for example: "Sure! Here are the best Samsung products I can recommend.").
+              - If the user asks for recommendations, clearly say that you are recommending products.
+              - If a brand is mentioned, explicitly mention the brand in the response.
+              - Then list or describe the products.
+              - Do NOT invent products.
+              - Use ONLY the products provided below.
+              - If no products exist, politely say so.
+              
+              Tone:
+              - Friendly
+              - Confident
+              - Clear
+              `
+              },
+
+              {
+                role: 'system',
+                content: `
+              USER INTENT: ${entities.intent}
+              USER SEARCH TERM: ${entities.searchTerm || 'not specified'}
+              `
+              },
+              
+            { 
+                role: 'system', 
+                content: `PRODUCTS:\n${productContext}` 
+            },
+
+            { 
+                role: 'user', 
+                content: message 
+            }
+        ]
+    };
+
+    console.log('AI PAYLOAD:', JSON.stringify(payload, null, 2));
+
+    const response = await axios.post(
+        this.API_URL,
+        payload,
+        { headers: this.getHeaders(), timeout: 7000 }
+    );
+
+    console.log('AI RAW RESPONSE:', JSON.stringify(response.data, null, 2));
+
+    const aiText =
+        response.data?.output?.[0]?.content?.[0]?.text ??
+        response.data?.choices?.[0]?.message?.content ??
+        'Here are some products you might like:';
+
+    return {
+        text: aiText,
+        products: products.slice(0, 10),
+        quickReplies: this.generateQuickReplies(entities, products),
+        needsProducts: true,
+        entities
+    };
+}
 
     private static buildSystemPrompt(
         context: ConversationContext,
-        categories?: { categoryid: number; name: string; maincategory: string }[]
+        categories?: { id: number; main_category: string; sub_category: string }[]
     ): string {
-        let prompt = `You are a helpful AI assistant for an electronics e-commerce platform. Your role is to help users find products, compare options, get recommendations, and make informed purchasing decisions.
-
-Guidelines:
-- Be concise, helpful, and professional
-- Use the user's preferred language (Ukrainian or English)
-- Ask clarifying questions if the user's request is unclear
-- Provide product recommendations with brief justifications
-- When comparing products, highlight key differences
-- Consider user preferences and budget constraints
-- Suggest complementary items when appropriate
-
+        let prompt = `
+You are a helpful AI assistant for an electronics store.
+Use ONLY the provided product data.
+Never invent products.
+Use user's language.
 `;
 
-        if (categories) {
-            prompt += `Available categories: ${categories.map(c => c.name).join(', ')}\n\n`;
-        }
-
-        if (context.userPreferences.budget) {
-            prompt += `User's mentioned budget: ${context.userPreferences.budget}\n\n`;
-        }
-
-        if (context.userPreferences.category) {
-            prompt += `User's interested category: ${context.userPreferences.category}\n\n`;
+        if (categories?.length) {
+            prompt += `Available categories: ${categories
+                .map(c => `${c.main_category} / ${c.sub_category}`)
+                .join(', ')}\n`;
         }
 
         return prompt;
     }
 
-    private static generateQuickReplies(entities: ExtractedEntities, products: Product[]): string[] {
+    // ================================
+    // QUICK REPLIES
+    // ================================
+    private static generateQuickReplies(
+        entities: ExtractedEntities,
+        products: Product[]
+    ): string[] {
         const replies: string[] = [];
-        
+
         if (entities.intent === 'compare' && products.length >= 2) {
             replies.push('Compare these products');
         }
-        
-        if (entities.intent === 'search' && products.length > 0) {
+
+        if (entities.intent === 'search') {
             replies.push('Show cheaper options');
             replies.push('Show higher rated');
         }
-        
-        if (entities.intent === 'recommend') {
-            replies.push('Show more recommendations');
-        }
 
-        if (products.length > 0) {
-            replies.push('Show similar products');
-        }
-
-        return replies.slice(0, 4); 
+        return replies.slice(0, 4);
     }
 
-    private static fallbackExtraction(message: string, context: ConversationContext): ExtractedEntities {
-        const lowerMessage = message.toLowerCase();
-        const language = this.detectLanguage(message);
-        
-        let intent: ExtractedEntities['intent'] = 'search';
-        if (lowerMessage.includes('compare') || lowerMessage.includes('difference')) {
-            intent = 'compare';
-        } else if (lowerMessage.includes('recommend') || lowerMessage.includes('suggest')) {
-            intent = 'recommend';
-        } else if (lowerMessage.includes('budget') || lowerMessage.includes('price')) {
-            intent = 'budget';
-        }
-
-        const budgetMatch = message.match(/(\d+)\s*(?:usd|dollars?|dol|грн|uah)/i);
-        const budget = budgetMatch ? parseInt(budgetMatch[1]) : undefined;
-
+    // ================================
+    // FALLBACKS
+    // ================================
+    private static fallbackExtraction(
+        message: string,
+        context: ConversationContext
+    ): ExtractedEntities {
         return {
-            intent,
+            intent: 'search',
             searchTerm: message,
-            budget,
-            language,
+            language: this.detectLanguage(message),
             needsClarification: false
+            
         };
+        
     }
 
-    
     private static generateFallbackResponse(
         message: string,
-        entities: ExtractedEntities,
-        products: Product[],
-        error?: any
+        entities: ExtractedEntities
     ): AIResponse {
-        let errorText = 'Unknown AI error';
-    
-        if (error?.response) {
-            errorText = `OpenAI error ${error.response.status}: ${JSON.stringify(error.response.data)}`;
-        } else if (error?.message) {
-            errorText = error.message;
-        }
-    
         return {
-            text: `AI ERROR: ${errorText}`,
+            text: 'AI ERROR: Unknown error',
             entities,
-            quickReplies: [],
-            needsProducts: false
+            quickReplies: []
         };
     }
-    
 
     private static detectLanguage(message: string): 'en' | 'uk' {
-        const cyrillicPattern = /[а-яёіїєґ]/i;
-        return cyrillicPattern.test(message) ? 'uk' : 'en';
-    }
-
-    static formatComparison(products: Product[]): any {
-        if (products.length < 2) return null;
-
-        return {
-            products: products.map(p => ({
-                id: p.productid,
-                title: p.title,
-                price: p.discount,
-                rating: p.stars,
-                category: p.category,
-                features: {
-                    reviews: p.reviewCount,
-                    isNew: p.isnew,
-                    onSale: p.issale
-                }
-            }))
-        };
+        return /[а-яіїєґ]/i.test(message) ? 'uk' : 'en';
     }
 }
-
-    

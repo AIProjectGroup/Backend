@@ -7,7 +7,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 
 import routes from './routes';
-import { connectDB } from './data/DB';
+import { connectDB, client } from './data/DB';
 import rateLimiterMiddleware from './middleware/rateLimit';
 
 const app: Express = express();
@@ -37,6 +37,17 @@ app.use('/api', routes);
 
 const startServer = async () => {
   await connectDB();
+
+  // === TEST CONNECTION ===
+  try {
+    const res = await client.query('SELECT COUNT(*) FROM electronics_products');
+    console.log('Products in DB:', res.rows[0].count);
+  } catch (err) {
+    console.error('Test query error:', err);
+  }
+  // ======================
+
+
   app.listen(port, () => {
     console.log(`[server]: Server is running at Port ${port}`);
   });
